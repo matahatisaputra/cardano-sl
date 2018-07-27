@@ -7,6 +7,7 @@ module Cardano.Wallet.Kernel.DB.BlockMeta (
   , AddressMeta(..)
   , addressMeta
   , emptyBlockMeta
+  , getAddrMeta
     -- * Local block metadata
   , LocalBlockMeta(..)
   , emptyLocalBlockMeta
@@ -144,6 +145,20 @@ appendLocalBlockMeta (LocalBlockMeta cur) = LocalBlockMeta . appendBlockMeta cur
 -- any information that is relevant to the wallet.
 emptyLocalBlockMeta :: LocalBlockMeta
 emptyLocalBlockMeta = LocalBlockMeta emptyBlockMeta
+
+-- | Look up metadata for the specified address.
+--
+-- NOTE: if an address does not appear in blockMetaAddressMeta
+-- we assume that `isUsed == False` and `isChange == False`
+getAddrMeta :: BlockMeta -> Core.Address -> AddressMeta
+getAddrMeta blockMeta addr
+    = fromMaybe def (Map.lookup addr addrsMeta)
+    where
+        addrsMeta = blockMeta ^. blockMetaAddressMeta ^. fromDb
+        def = AddressMeta {
+                _addressMetaIsUsed   = False
+              , _addressMetaIsChange = False
+              }
 
 {-------------------------------------------------------------------------------
   Pretty-printing
