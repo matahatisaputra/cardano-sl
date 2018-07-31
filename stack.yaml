@@ -55,8 +55,8 @@ packages:
   extra-dep: true
 
 - location:
-    git: https://github.com/input-output-hk/cardano-crypto
-    commit: 33c7ecc6e4bd71c3ea0195e9d796eeace7be22cf
+    git: https://github.com/anviking/cardano-crypto # FIXME: Don't use fork
+    commit: 30be7df3f05553d20d6b01ee7cafa3bed1a84394
   extra-dep: true
 # to be removed when haskell-ip is in the current stackage version
 - location:

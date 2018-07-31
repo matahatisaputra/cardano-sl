@@ -32,6 +32,7 @@ module Pos.Util.Mnemonic
 import           Universum
 
 import           Basement.Sized.List (unListN)
+import           Control.Arrow (left)
 import           Control.Lens ((?~))
 import           Crypto.Encoding.BIP39
 import           Crypto.Encoding.BIP39.Dictionary (mnemonicSentenceToListN)
@@ -43,7 +44,7 @@ import           Data.ByteString (ByteString)
 import           Data.Default (Default (def))
 import           Data.Swagger (NamedSchema (..), ToSchema (..), maxItems,
                      minItems)
-import           Formatting (bprint, build, formatToString, (%))
+import           Formatting (bprint, build, formatToString)
 import           Pos.Binary (serialize')
 import           Pos.Crypto (AesKey (..))
 import           Pos.Infra.Util.LogSafe (SecureLog)
@@ -80,11 +81,9 @@ data MnemonicException = UnexpectedMnemonicErr MnemonicErr
 
 
 data MnemonicErr
-    = MnemonicErrInvalidEntropyLength Int
-    | MnemonicErrFailedToCreate
+    = MnemonicErrInvalidMnemonic BIP39Err
     | MnemonicErrForbiddenMnemonic
     deriving (Show)
-
 
 --
 -- CONSTRUCTORS
@@ -95,14 +94,10 @@ mkEntropy
     :: forall n csz. (ValidEntropySize n, ValidChecksumSize n csz)
     => ByteString
     -> Either MnemonicErr (Entropy n)
-mkEntropy =
-    let
-        n = fromIntegral $ natVal (Proxy @n)
-    in
-        maybe (Left $ MnemonicErrInvalidEntropyLength n) Right . toEntropy @n
+mkEntropy = left MnemonicErrInvalidMnemonic . toEntropy @n
 
 
--- | Generate Entropy of a given size using a random seed.
+-- | Generate Entropy of a given size using a random Seed.
 --
 -- Example:
 --     do
@@ -129,16 +124,13 @@ mkMnemonic
     => [Text]
     -> Either MnemonicErr (Mnemonic mw)
 mkMnemonic wordsm = do
-    sentence <- maybe
-        (Left MnemonicErrFailedToCreate)
-        (Right . mnemonicPhraseToMnemonicSentence Dictionary.english)
-        (mnemonicPhrase @mw (toUtf8String <$> wordsm))
+    phrase <- left MnemonicErrInvalidMnemonic
+        $ mnemonicPhrase @mw (toUtf8String <$> wordsm)
 
-    entropy <- maybe
-        (Left MnemonicErrFailedToCreate)
-        Right
-        (wordsToEntropy sentence :: Maybe (Entropy n))
+    sentence <- left MnemonicErrInvalidMnemonic
+        $ mnemonicPhraseToMnemonicSentence Dictionary.english phrase
 
+    entropy <- left MnemonicErrInvalidMnemonic $ wordsToEntropy sentence
     when (isForbiddenMnemonic sentence) $
         Left MnemonicErrForbiddenMnemonic
 
@@ -296,10 +288,8 @@ instance Buildable (SecureLog (Mnemonic mw)) where
 
 instance Buildable MnemonicErr where
     build = \case
-        MnemonicErrInvalidEntropyLength l ->
-            bprint ("Entropy must be a sequence of " % build % " bytes") l
-        MnemonicErrFailedToCreate ->
-            bprint "Invalid Mnemonic words"
+        MnemonicErrInvalidMnemonic err ->
+            bprint $ show err
         MnemonicErrForbiddenMnemonic ->
             bprint "Forbidden Mnemonic: an example Mnemonic has been submitted. \
             \Please generate a fresh and private Mnemonic from a trusted source"
@@ -325,13 +315,13 @@ instance Default (Mnemonic 12) where
                 , "flee"
                 ]
 
-            sentence = maybe
-                (error $ show $ UnexpectedMnemonicErr MnemonicErrFailedToCreate)
-                (mnemonicPhraseToMnemonicSentence Dictionary.english)
+            phrase = either (error . show) id
                 (mnemonicPhrase @12 (toUtf8String <$> wordsm))
 
-            entropy = fromMaybe
-                (error $ show $ UnexpectedMnemonicErr MnemonicErrFailedToCreate)
+            sentence = either (error . show) id
+                ((mnemonicPhraseToMnemonicSentence Dictionary.english) phrase)
+
+            entropy = either (error . show) id
                 (wordsToEntropy @(EntropySize 12) sentence)
         in Mnemonic
             { mnemonicToSentence = sentence
