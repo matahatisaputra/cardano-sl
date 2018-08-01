@@ -120,7 +120,7 @@ data WalletClient m
          :: Resp m NodeSettings
     -- info
     , getNodeInfo
-         :: Resp m NodeInfo
+         :: ForceNtpCheck -> Resp m NodeInfo
     } deriving Generic
 
 -- | Paginates through all request pages and concatenates the result.
@@ -224,7 +224,7 @@ hoistClient phi wc = WalletClient
     , getNodeSettings =
         phi (getNodeSettings wc)
     , getNodeInfo =
-        phi (getNodeInfo wc)
+        phi . getNodeInfo wc
     }
 
 -- | Generalize a @'WalletClient' 'IO'@ into a @('MonadIO' m) =>
