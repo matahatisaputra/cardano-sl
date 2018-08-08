@@ -21,8 +21,7 @@ module Ntp.Client
 import           Universum hiding (Last, catch)
 
 import           Control.Concurrent (threadDelay)
-import           Control.Concurrent.Async (async, cancel, concurrently_, race,
-                     wait, withAsync)
+import           Control.Concurrent.Async (async, concurrently_, race)
 import           Control.Concurrent.STM (TVar, check, modifyTVar', retry)
 import           Control.Exception (Exception, IOException, catch, handle)
 import           Control.Monad (forever)
@@ -162,37 +161,25 @@ data NtpClientCmd = SendRequest
 -- drift.
 sendLoop :: NtpClient -> [Addresses] -> IO ()
 sendLoop cli addrs = do
-
-
     let respTimeout = ntpResponseTimeout (ncSettings cli)
     let poll        = ntpPollDelay (ncSettings cli)
 
-    () <- withAsync
-        (do
-            -- wait for responses and update status
-            _ <- timeout respTimeout waitForResponses
-            updateStatus cli
-            -- after @'updateStatus'@ @'ntpStatus'@ is guaranteed to be
-            -- different from @'NtpSyncPending'@, now we can wait until it was
-            -- changed back to @'NtpSyncPending'@ to force a request.
-            forceRequest
-        )
-        (\a -> do
-            -- send packets and wait until end of poll delay
-            sock <- atomically $ readTVar $ ncSockets cli
-            pack <- mkNtpPacket
-            sendPacket sock pack addrs
+    -- send packets and wait until end of poll delay
+    sock <- atomically $ readTVar $ ncSockets cli
+    pack <- mkNtpPacket
+    sendPacket sock pack addrs
 
-            cmd <- timeout poll (wait a)
-            case cmd of
-                Nothing -> cancel a
-                Just SendRequest
-                        -> sendLoop cli addrs
-        )
+    _ <- timeout respTimeout waitForResponses
+    updateStatus cli
+    -- after @'updateStatus'@ @'ntpStatus'@ is guaranteed to be
+    -- different from @'NtpSyncPending'@, now we can wait until it was
+    -- changed back to @'NtpSyncPending'@ to force a request.
+    _ <- timeout poll waitForRequest
 
     -- reset state & status before next loop
     atomically $ writeTVar (ncState cli) []
     atomically $ writeTVar (ncStatus cli) NtpSyncPending
+
     sendLoop cli addrs
 
     where
@@ -204,11 +191,12 @@ sendLoop cli addrs = do
                     retry
             logDebug "collected all responses"
 
-        forceRequest =
+        -- Wait for a request to force an ntp check.
+        waitForRequest =
             atomically $ do
                 status <- readTVar $ ncStatus cli
                 check (status == NtpSyncPending)
-                return SendRequest
+                return ()
 
 
 -- |

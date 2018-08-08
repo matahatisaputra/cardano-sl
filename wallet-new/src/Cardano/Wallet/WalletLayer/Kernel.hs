@@ -8,53 +8,42 @@ module Cardano.Wallet.WalletLayer.Kernel
 
 import           Universum
 
-import           Control.Lens (to)
-import           Data.Coerce (coerce)
-import           Data.Default (def)
+import qualified Control.Concurrent.STM as STM
 import           Data.Maybe (fromJust)
 import           Data.Time.Units (Second)
-import           Formatting (build, sformat)
 import           System.Wlog (Severity (Debug))
 
 import           Pos.Chain.Block (Blund, Undo (..))
-
-import qualified Cardano.Wallet.Kernel as Kernel
-import qualified Cardano.Wallet.Kernel.Addresses as Kernel
-import qualified Cardano.Wallet.Kernel.Transactions as Kernel
-import qualified Cardano.Wallet.Kernel.Wallets as Kernel
-
-import qualified Cardano.Wallet.Kernel.DB.HdWallet as HD
-import           Cardano.Wallet.Kernel.DB.InDb (InDb (..), fromDb)
-import           Cardano.Wallet.Kernel.DB.Resolved (ResolvedBlock)
-import           Cardano.Wallet.Kernel.Diffusion (WalletDiffusion (..))
-import           Cardano.Wallet.Kernel.Keystore (Keystore)
-import           Cardano.Wallet.Kernel.Types (AccountId (..),
-                     RawResolvedBlock (..), fromRawResolvedBlock)
-import           Cardano.Wallet.WalletLayer.ExecutionTimeLimit
-                     (limitExecutionTimeTo)
-import           Cardano.Wallet.WalletLayer.Types (ActiveWalletLayer (..),
-                     CreateAddressError (..), CreateWalletError (..),
-                     EstimateFeesError (..), NewPaymentError (..),
-                     PassiveWalletLayer (..), WalletLayerError (..))
-
-import           Cardano.Wallet.Kernel.CoinSelection.FromGeneric
-                     (CoinSelectionOptions (..), ExpenseRegulation,
-                     InputGrouping, newOptions)
-
-import qualified Cardano.Wallet.Kernel.BIP39 as BIP39
-import           Pos.Core (Address, Coin, decodeTextAddress, mkCoin)
+import           Pos.Core (Address, Coin)
 import qualified Pos.Core as Core
 import           Pos.Core.Chrono (OldestFirst (..))
 
-import qualified Cardano.Wallet.API.V1.Types as V1
-import qualified Cardano.Wallet.Kernel.Actions as Actions
-import           Cardano.Wallet.Kernel.MonadDBReadAdaptor (MonadDBReadAdaptor)
-import           Cardano.Wallet.Kernel.Util (getCurrentTimestamp)
-import           Pos.Crypto.Signing
-
 import           Cardano.Wallet.API.V1.Types (Payment (..),
-                     PaymentDistribution (..), PaymentSource (..), V1 (..),
+                     PaymentDistribution (..), PaymentSource (..),
                      WalletId (..), unV1)
+import qualified Cardano.Wallet.Kernel as Kernel
+import qualified Cardano.Wallet.Kernel.Actions as Actions
+import           Cardano.Wallet.Kernel.ChainState (dummyChainBrief)
+import           Cardano.Wallet.Kernel.CoinSelection.FromGeneric
+                     (CoinSelectionOptions (..), ExpenseRegulation,
+                     InputGrouping, newOptions)
+import qualified Cardano.Wallet.Kernel.DB.HdWallet as HD
+import           Cardano.Wallet.Kernel.DB.InDb (InDb (..))
+import           Cardano.Wallet.Kernel.DB.Resolved (ResolvedBlock)
+import           Cardano.Wallet.Kernel.Diffusion (WalletDiffusion (..))
+import           Cardano.Wallet.Kernel.Keystore (Keystore)
+import           Cardano.Wallet.Kernel.NodeStateAdaptor (NodeStateAdaptor)
+import qualified Cardano.Wallet.Kernel.Transactions as Kernel
+import           Cardano.Wallet.Kernel.Types (RawResolvedBlock (..),
+                     fromRawResolvedBlock)
+import           Cardano.Wallet.WalletLayer.ExecutionTimeLimit
+                     (limitExecutionTimeTo)
+import qualified Cardano.Wallet.WalletLayer.Kernel.Accounts as Accounts
+import qualified Cardano.Wallet.WalletLayer.Kernel.Addresses as Addresses
+import qualified Cardano.Wallet.WalletLayer.Kernel.Wallets as Wallets
+import           Cardano.Wallet.WalletLayer.Types (ActiveWalletLayer (..),
+                     EstimateFeesError (..), NewPaymentError (..),
+                     PassiveWalletLayer (..), WalletLayerError (..))
 
 -- | Initialize the passive wallet.
 -- The passive wallet cannot send new transactions.
@@ -62,112 +51,59 @@ bracketPassiveWallet
     :: forall m n a. (MonadIO n, MonadIO m, MonadMask m)
     => (Severity -> Text -> IO ())
     -> Keystore
-    -> MonadDBReadAdaptor IO
+    -> NodeStateAdaptor IO
     -> (PassiveWalletLayer n -> Kernel.PassiveWallet -> m a) -> m a
 bracketPassiveWallet logFunction keystore rocksDB f =
     Kernel.bracketPassiveWallet logFunction keystore rocksDB $ \w -> do
-
-      -- Create the wallet worker and its communication endpoint `invoke`.
-      bracket (liftIO $ Actions.forkWalletWorker $ Actions.WalletActionInterp
-                 { Actions.applyBlocks  =  \blunds ->
-                     Kernel.applyBlocks w $
-                         OldestFirst (mapMaybe blundToResolvedBlock (toList (getOldestFirst blunds)))
-                 , Actions.switchToFork = \_ _ -> logFunction Debug "<switchToFork>"
-                 , Actions.emit         = logFunction Debug
-                 }
-              ) (\invoke -> liftIO (invoke Actions.Shutdown))
-              $ \invoke -> do
-                  -- TODO (temporary): build a sample wallet from a backup phrase
-                  _ <- liftIO $ do
-                    Kernel.createHdWallet w
-                                          (def @(BIP39.Mnemonic 12))
-                                          emptyPassphrase
-                                          assuranceLevel
-                                          walletName
-
-                  f (passiveWalletLayer w invoke) w
-
+      let wai = Actions.WalletActionInterp
+                 { Actions.applyBlocks = \blunds ->
+                     Kernel.applyBlocks w
+                        (OldestFirst (mapMaybe blundToResolvedBlock
+                           (toList (getOldestFirst blunds))))
+                 , Actions.switchToFork = \_ _ ->
+                     logFunction Debug "<switchToFork>"
+                 , Actions.emit = logFunction Debug }
+      Actions.withWalletWorker wai $ \invoke -> do
+         f (passiveWalletLayer w invoke) w
   where
-    -- TODO consider defaults
-    walletName       = HD.WalletName "(new wallet)"
-    assuranceLevel   = HD.AssuranceLevelNormal
-
     -- | TODO(ks): Currently not implemented!
     passiveWalletLayer :: Kernel.PassiveWallet
-                       -> (Actions.WalletAction Blund -> IO ())
+                       -> (Actions.WalletAction Blund -> STM ())
                        -> PassiveWalletLayer n
     passiveWalletLayer wallet invoke =
-        PassiveWalletLayer
-            { _pwlCreateWallet   =
-                \(V1.NewWallet (V1.BackupPhrase mnemonic) mbSpendingPassword v1AssuranceLevel v1WalletName operation) -> do
-                    liftIO $ limitExecutionTimeTo (30 :: Second) CreateWalletTimeLimitReached $ do
-                        case operation of
-                             V1.RestoreWallet -> error "Not implemented, see [CBR-243]."
-                             V1.CreateWallet  -> do
-                                 let spendingPassword = maybe emptyPassphrase coerce mbSpendingPassword
-                                 let hdAssuranceLevel = case v1AssuranceLevel of
-                                       V1.NormalAssurance -> HD.AssuranceLevelNormal
-                                       V1.StrictAssurance -> HD.AssuranceLevelStrict
+        let invokeIO :: forall m'. MonadIO m' => Actions.WalletAction Blund -> m' ()
+            invokeIO = liftIO . STM.atomically . invoke
+        in PassiveWalletLayer
+            { _pwlCreateWallet          = Wallets.createWallet wallet
 
-                                 res <- liftIO $ Kernel.createHdWallet wallet
-                                                                       mnemonic
-                                                                       spendingPassword
-                                                                       hdAssuranceLevel
-                                                                       (HD.WalletName v1WalletName)
-                                 case res of
-                                      Left kernelError ->
-                                          return (Left $ CreateWalletError kernelError)
-                                      Right hdRoot -> do
-                                          let (hasSpendingPassword, mbLastUpdate) =
-                                                  case hdRoot ^. HD.hdRootHasPassword of
-                                                       HD.NoSpendingPassword -> (False, Nothing)
-                                                       HD.HasSpendingPassword lastUpdate -> (True, Just (lastUpdate ^. fromDb))
-                                          now <- liftIO getCurrentTimestamp
-                                          let lastUpdate = fromMaybe now mbLastUpdate
-                                          let createdAt  = hdRoot ^. HD.hdRootCreatedAt . fromDb
-                                          let walletId = hdRoot ^. HD.hdRootId . to (sformat build . _fromDb . HD.getHdRootId)
-                                          return $ Right V1.Wallet {
-                                              walId                         = (V1.WalletId walletId)
-                                            , walName                       = v1WalletName
-                                            , walBalance                    = V1 (mkCoin 0)
-                                            , walHasSpendingPassword        = hasSpendingPassword
-                                            , walSpendingPasswordLastUpdate = V1 lastUpdate
-                                            , walCreatedAt                  = V1 createdAt
-                                            , walAssuranceLevel             = v1AssuranceLevel
-                                            , walSyncState                  = V1.Synced
-                                          }
+            , _pwlGetWallets            = do
+                    snapshot <- liftIO (Kernel.getWalletSnapshot wallet)
+                    return (Wallets.getWallets snapshot)
+            , _pwlGetWallet             =
+                \walletId -> do
+                    snapshot <- liftIO (Kernel.getWalletSnapshot wallet)
+                    return (Wallets.getWallet snapshot walletId)
+            , _pwlUpdateWallet          = Wallets.updateWallet wallet
+            , _pwlUpdateWalletPassword  = Wallets.updateWalletPassword wallet
+            , _pwlDeleteWallet          = Wallets.deleteWallet wallet
 
-            , _pwlGetWalletIds   = error "Not implemented!"
-            , _pwlGetWallet      = error "Not implemented!"
-            , _pwlUpdateWallet   = error "Not implemented!"
-            , _pwlDeleteWallet   = error "Not implemented!"
+            , _pwlCreateAccount = Accounts.createAccount wallet
+            , _pwlGetAccounts   =
+                \walletId -> do
+                    snapshot <- liftIO (Kernel.getWalletSnapshot wallet)
+                    return (Accounts.getAccounts snapshot walletId)
+            , _pwlGetAccount    =
+                \walletId accountIndex -> do
+                    snapshot <- liftIO (Kernel.getWalletSnapshot wallet)
+                    return (Accounts.getAccount snapshot walletId accountIndex)
+            , _pwlUpdateAccount  = Accounts.updateAccount wallet
+            , _pwlDeleteAccount  = Accounts.deleteAccount wallet
 
-            , _pwlCreateAccount  = error "Not implemented!"
-            , _pwlGetAccounts    = error "Not implemented!"
-            , _pwlGetAccount     = error "Not implemented!"
-            , _pwlUpdateAccount  = error "Not implemented!"
-            , _pwlDeleteAccount  = error "Not implemented!"
-
-            , _pwlCreateAddress  =
-                \(V1.NewAddress mbSpendingPassword accIdx (V1.WalletId wId)) -> do
-                    liftIO $ limitExecutionTimeTo (30 :: Second) CreateAddressTimeLimitReached $ do
-                        case decodeTextAddress wId of
-                             Left _ ->
-                                 return $ Left (CreateAddressAddressDecodingFailed wId)
-                             Right rootAddr -> do
-                                let hdRootId = HD.HdRootId . InDb $ rootAddr
-                                let hdAccountId = HD.HdAccountId hdRootId (HD.HdAccountIx accIdx)
-                                let passPhrase = maybe mempty coerce mbSpendingPassword
-                                res <- liftIO $ Kernel.createAddress passPhrase
-                                                                     (AccountIdHdRnd hdAccountId)
-                                                                     wallet
-                                case res of
-                                     Right newAddr -> return (Right newAddr)
-                                     Left  err     -> return (Left $ CreateAddressError err)
+            , _pwlCreateAddress  = Addresses.createAddress wallet
             , _pwlGetAddresses   = error "Not implemented!"
 
-            , _pwlApplyBlocks    = liftIO . invoke . Actions.ApplyBlocks
-            , _pwlRollbackBlocks = liftIO . invoke . Actions.RollbackBlocks
+            , _pwlApplyBlocks    = invokeIO . Actions.ApplyBlocks
+            , _pwlRollbackBlocks = invokeIO . Actions.RollbackBlocks
             }
 
     -- The use of the unsafe constructor 'UnsafeRawResolvedBlock' is justified
@@ -175,7 +111,7 @@ bracketPassiveWallet logFunction keystore rocksDB f =
     blundToResolvedBlock :: Blund -> Maybe ResolvedBlock
     blundToResolvedBlock (b,u)
         = rightToJust b <&> \mainBlock ->
-            fromRawResolvedBlock
+            fromRawResolvedBlock dummyChainBrief
             $ UnsafeRawResolvedBlock mainBlock spentOutputs'
         where
             spentOutputs' = map (map fromJust) $ undoTx u

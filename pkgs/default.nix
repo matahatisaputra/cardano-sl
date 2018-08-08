@@ -14756,10 +14756,8 @@ license = stdenv.lib.licenses.bsd3;
 , network
 , network-transport
 , network-transport-inmemory
-, network-transport-tcp
 , optparse-applicative
 , parsec
-, pipes
 , pvss
 , QuickCheck
 , random
@@ -14854,7 +14852,6 @@ network
 network-transport
 optparse-applicative
 parsec
-pipes
 pvss
 QuickCheck
 random
@@ -14907,6 +14904,7 @@ cardano-sl-infra-test
 cardano-sl-networking
 cardano-sl-util
 cardano-sl-util-test
+conduit
 containers
 cryptonite
 data-default
@@ -14920,7 +14918,6 @@ lens
 log-warper
 network-transport
 network-transport-inmemory
-pipes
 pvss
 QuickCheck
 random
@@ -14947,13 +14944,13 @@ cardano-sl-infra
 cardano-sl-networking
 cardano-sl-util
 cardano-sl-util-test
+conduit
 criterion
 deepseq
 formatting
 network-transport
-network-transport-tcp
+network-transport-inmemory
 optparse-applicative
-pipes
 QuickCheck
 time-units
 universum
@@ -15185,6 +15182,7 @@ configureFlags = [
 "--ghc-option=-Werror"
 ];
 libraryHaskellDepends = [
+aeson
 base
 binary
 bytestring
@@ -15348,6 +15346,8 @@ license = stdenv.lib.licenses.mit;
 , cardano-sl-crypto-test
 , cardano-sl-util
 , cardano-sl-util-test
+, cborg
+, cereal
 , conduit
 , containers
 , cpphs
@@ -15379,6 +15379,7 @@ license = stdenv.lib.licenses.mit;
 , random
 , reflection
 , safe-exceptions
+, safecopy
 , serokell-util
 , stdenv
 , template-haskell
@@ -15411,6 +15412,8 @@ cardano-sl-binary
 cardano-sl-core
 cardano-sl-crypto
 cardano-sl-util
+cborg
+cereal
 conduit
 containers
 cryptonite
@@ -15435,6 +15438,7 @@ parsec
 plutus-prototype
 reflection
 safe-exceptions
+safecopy
 serokell-util
 template-haskell
 text
@@ -15505,6 +15509,7 @@ license = stdenv.lib.licenses.mit;
 , bytestring
 , cardano-crypto
 , cardano-sl-binary
+, cardano-sl-binary-test
 , cardano-sl-chain
 , cardano-sl-core
 , cardano-sl-core-test
@@ -15536,6 +15541,7 @@ base
 bytestring
 cardano-crypto
 cardano-sl-binary
+cardano-sl-binary-test
 cardano-sl-chain
 cardano-sl-core
 cardano-sl-core-test
@@ -16098,6 +16104,7 @@ license = stdenv.lib.licenses.mit;
 , directory
 , ekg-core
 , ether
+, exceptions
 , filepath
 , formatting
 , lens
@@ -16106,7 +16113,6 @@ license = stdenv.lib.licenses.mit;
 , memory
 , mmorph
 , mtl
-, pipes
 , reflection
 , resourcet
 , rocksdb-haskell-ng
@@ -16149,6 +16155,7 @@ data-default
 directory
 ekg-core
 ether
+exceptions
 filepath
 formatting
 lens
@@ -16157,7 +16164,6 @@ lrucache
 memory
 mmorph
 mtl
-pipes
 reflection
 resourcet
 rocksdb-haskell-ng
@@ -17721,6 +17727,7 @@ license = stdenv.lib.licenses.mit;
 , bytestring
 , cardano-crypto
 , cardano-sl
+, cardano-sl-binary
 , cardano-sl-binary-test
 , cardano-sl-chain
 , cardano-sl-client
@@ -17834,6 +17841,7 @@ beam-sqlite
 bytestring
 cardano-crypto
 cardano-sl
+cardano-sl-binary
 cardano-sl-chain
 cardano-sl-client
 cardano-sl-core
@@ -17887,6 +17895,7 @@ servant-swagger-ui-core
 servant-swagger-ui-redoc
 sqlite-simple
 sqlite-simple-errors
+stm
 swagger2
 text
 time
@@ -17948,6 +17957,7 @@ base
 bytestring
 cardano-crypto
 cardano-sl
+cardano-sl-binary
 cardano-sl-binary-test
 cardano-sl-chain
 cardano-sl-client

@@ -18,51 +18,53 @@ module Cardano.Wallet.Kernel.DB.AcidState (
     -- ** Updates on HD wallets
     -- *** CREATE
   , CreateHdWallet(..)
+  , CreateHdAccount(..)
   , CreateHdAddress(..)
     -- *** UPDATE
-  , UpdateHdRootAssurance
-  , UpdateHdRootName(..)
+  , UpdateHdWallet(..)
+  , UpdateHdRootPassword(..)
   , UpdateHdAccountName(..)
     -- *** DELETE
   , DeleteHdRoot(..)
   , DeleteHdAccount(..)
-    -- * Errors
-  , NewPendingError
-    -- * Testing
+    -- *** Testing
   , ObservableRollbackUseInTestsOnly(..)
+    -- * Errors
+  , NewPendingError(..)
+  , RollbackDuringRestoration(..)
   ) where
 
 import           Universum
 
 import           Control.Lens.TH (makeLenses)
 import           Control.Monad.Except (MonadError, catchError)
-
-import           Test.QuickCheck (Arbitrary (..), oneof)
-
 import           Data.Acid (Query, Update, makeAcidic)
 import qualified Data.Map.Merge.Strict as Map.Merge
 import qualified Data.Map.Strict as Map
 import           Data.SafeCopy (base, deriveSafeCopy)
 import           Formatting (bprint, build, (%))
 import qualified Formatting.Buildable
+import           Test.QuickCheck (Arbitrary (..), oneof)
 
 import           Pos.Chain.Txp (Utxo)
 import           Pos.Core.Chrono (OldestFirst (..))
 import qualified Pos.Core.Txp as Txp
 
-import qualified Cardano.Wallet.Kernel.DB.Util.IxSet as IxSet
-import           Cardano.Wallet.Kernel.PrefilterTx (AddrWithId,
-                     PrefilteredBlock (..), emptyPrefilteredBlock)
-
+import           Cardano.Wallet.Kernel.ChainState
+import           Cardano.Wallet.Kernel.DB.BlockMeta
 import           Cardano.Wallet.Kernel.DB.HdWallet
 import qualified Cardano.Wallet.Kernel.DB.HdWallet.Create as HD
 import qualified Cardano.Wallet.Kernel.DB.HdWallet.Delete as HD
 import qualified Cardano.Wallet.Kernel.DB.HdWallet.Update as HD
 import           Cardano.Wallet.Kernel.DB.InDb
 import           Cardano.Wallet.Kernel.DB.Spec
+import qualified Cardano.Wallet.Kernel.DB.Spec.Pending as Pending
 import qualified Cardano.Wallet.Kernel.DB.Spec.Update as Spec
-import qualified Cardano.Wallet.Kernel.DB.Spec.Util as Spec
 import           Cardano.Wallet.Kernel.DB.Util.AcidState
+import qualified Cardano.Wallet.Kernel.DB.Util.IxSet as IxSet
+import           Cardano.Wallet.Kernel.PrefilterTx (AddrWithId,
+                     PrefilteredBlock (..), emptyPrefilteredBlock)
+import qualified Cardano.Wallet.Kernel.Util.Core as Core
 
 {-------------------------------------------------------------------------------
   Top-level database
@@ -91,7 +93,7 @@ defDB :: DB
 defDB = DB initHdWallets
 
 {-------------------------------------------------------------------------------
-  Wrap wallet spec
+  Custom errors
 -------------------------------------------------------------------------------}
 
 -- | Errors thrown by 'newPending'
@@ -102,25 +104,23 @@ data NewPendingError =
     -- | Some inputs are not in the wallet utxo
   | NewPendingFailed Spec.NewPendingFailed
 
+
+-- | We cannot roll back  when we don't have full historical data available
+data RollbackDuringRestoration = RollbackDuringRestoration
+
 deriveSafeCopy 1 'base ''NewPendingError
+deriveSafeCopy 1 'base ''RollbackDuringRestoration
 
-instance Arbitrary NewPendingError where
-    arbitrary = oneof [ NewPendingUnknown <$> arbitrary
-                      , NewPendingFailed  <$> arbitrary
-                      ]
-
-instance Buildable NewPendingError where
-    build (NewPendingUnknown unknownAccount) =
-        bprint ("NewPendingUnknown " % build) unknownAccount
-    build (NewPendingFailed npf) =
-        bprint ("NewPendingFailed " % build) npf
+{-------------------------------------------------------------------------------
+  Wrap wallet spec
+-------------------------------------------------------------------------------}
 
 newPending :: HdAccountId
            -> InDb Txp.TxAux
            -> Update DB (Either NewPendingError ())
-newPending accountId tx = runUpdate' . zoom dbHdWallets $
+newPending accountId tx = runUpdateDiscardSnapshot . zoom dbHdWallets $
     zoomHdAccountId NewPendingUnknown accountId $
-    zoom hdAccountCheckpoints $
+    zoomHdAccountCheckpoints $
       mapUpdateErrors NewPendingFailed $ Spec.newPending tx
 
 -- | Cancels the input transactions from the 'Checkpoints' of each of
@@ -140,7 +140,8 @@ cancelPending cancelled = void . runUpdate' . zoom dbHdWallets $
         -- skip cancelling the transactions for the account that has been removed.
         handleError (\(_e :: UnknownHdAccount) -> return ()) $
             zoomHdAccountId identity accountId $ do
-              modify' (over hdAccountCheckpoints (Spec.cancelPending txids))
+              zoomHdAccountCheckpoints $
+                modify' $ Spec.cancelPending txids
     where
         handleError :: MonadError e m => (e -> m a) -> m a -> m a
         handleError = flip catchError
@@ -168,10 +169,15 @@ applyBlock blocksByAccount = runUpdateNoErrors $ zoom dbHdWallets $ do
     blocksByAccount' <- fillInEmptyBlock blocksByAccount
     createPrefiltered
         initUtxoAndAddrs
-        (\prefBlock -> zoom hdAccountCheckpoints $
-                           modify $ Spec.applyBlock prefBlock)
+        updateAccount
         blocksByAccount'
   where
+    updateAccount :: PrefilteredBlock -> Update' HdAccount Void ()
+    updateAccount pb =
+        matchHdAccountCheckpoints
+          (modify $ Spec.applyBlock        pb)
+          (modify $ Spec.applyBlockPartial pb)
+
     -- Initial UTxO and addresses for a new account
     --
     -- NOTE: When we initialize the kernel, we look at the genesis UTxO and create
@@ -194,15 +200,21 @@ applyBlock blocksByAccount = runUpdateNoErrors $ zoom dbHdWallets $ do
 -- does not have a 'SafeCopy' instance.
 switchToFork :: Int
              -> [Map HdAccountId PrefilteredBlock]
-             -> Update DB ()
-switchToFork n blocks = runUpdateNoErrors $ zoom dbHdWallets $ do
+             -> Update DB (Either RollbackDuringRestoration ())
+switchToFork n blocks = runUpdateDiscardSnapshot $ zoom dbHdWallets $ do
     blocks' <- mapM fillInEmptyBlock blocks
     createPrefiltered
         initUtxoAndAddrs
-        (\prefBlocks -> zoom hdAccountCheckpoints $
-                            modify $ Spec.switchToFork n (OldestFirst prefBlocks))
+        updateAccount
         (distribute blocks')
   where
+    updateAccount :: [PrefilteredBlock]
+                  -> Update' HdAccount RollbackDuringRestoration ()
+    updateAccount pbs =
+        matchHdAccountCheckpoints
+          (modify $ Spec.switchToFork n (OldestFirst pbs))
+          (throwError RollbackDuringRestoration)
+
     -- The natural result of prefiltering each block is a list of maps, but
     -- in order to apply them to each account, we want a map of lists
     --
@@ -221,12 +233,12 @@ switchToFork n blocks = runUpdateNoErrors $ zoom dbHdWallets $ do
 -- | Observable rollback, used for tests only
 --
 -- See 'switchToFork' for use in real code.
-observableRollbackUseInTestsOnly :: Update DB ()
-observableRollbackUseInTestsOnly = runUpdateNoErrors $
+observableRollbackUseInTestsOnly :: Update DB (Either RollbackDuringRestoration ())
+observableRollbackUseInTestsOnly = runUpdateDiscardSnapshot $
     zoomAll (dbHdWallets . hdWalletsAccounts) $
-      hdAccountCheckpoints %~ Spec.observableRollbackUseInTestsOnly
-
-
+      matchHdAccountCheckpoints
+        (modify' Spec.observableRollbackUseInTestsOnly)
+        (throwError RollbackDuringRestoration)
 
 {-------------------------------------------------------------------------------
   Wallet creation
@@ -242,12 +254,13 @@ observableRollbackUseInTestsOnly = runUpdateNoErrors $
 createHdWallet :: HdRoot
                -> Map HdAccountId (Utxo,[AddrWithId])
                -> Update DB (Either HD.CreateHdRootError ())
-createHdWallet newRoot utxoByAccount = runUpdate' . zoom dbHdWallets $ do
-      HD.createHdRoot newRoot
-      createPrefiltered
-          identity
-          (\_ -> return ()) -- we just want to create the accounts
-          utxoByAccount
+createHdWallet newRoot utxoByAccount =
+    runUpdateDiscardSnapshot . zoom dbHdWallets $ do
+          HD.createHdRoot newRoot
+          createPrefiltered
+              identity
+              (\_ -> return ()) -- we just want to create the accounts
+              utxoByAccount
 
 {-------------------------------------------------------------------------------
   Internal auxiliary: apply a function to a prefiltered block/utxo
@@ -277,7 +290,7 @@ fillInDefaults def accs =
 -- | Specialization of 'fillInDefaults' for prefiltered blocks
 fillInEmptyBlock :: Map HdAccountId PrefilteredBlock
                  -> Update' HdWallets e (Map HdAccountId PrefilteredBlock)
-fillInEmptyBlock = fillInDefaults (const emptyPrefilteredBlock)
+fillInEmptyBlock = fillInDefaults $ \_ -> emptyPrefilteredBlock dummyChainBrief
 
 -- | For each of the specified accounts, create them if they do not exist,
 -- and apply the specified function.
@@ -323,11 +336,12 @@ createPrefiltered initUtxoAndAddrs applyP accs = do
             firstCheckpoint :: Utxo -> Checkpoint
             firstCheckpoint utxo' = Checkpoint {
                   _checkpointUtxo        = InDb utxo'
-                , _checkpointUtxoBalance = InDb $ Spec.balance utxo'
-                , _checkpointPending     = Pending . InDb $ Map.empty
+                , _checkpointUtxoBalance = InDb $ Core.utxoBalance utxo'
+                , _checkpointPending     = Pending.empty
                 -- Since this is the first checkpoint before we have applied
                 -- any blocks, the block metadata is empty
-                , _checkpointBlockMeta   = mempty
+                , _checkpointBlockMeta   = emptyBlockMeta
+                , _checkpointChainBrief  = dummyChainBrief
                 }
 
 {-------------------------------------------------------------------------------
@@ -335,37 +349,46 @@ createPrefiltered initUtxoAndAddrs applyP accs = do
 -------------------------------------------------------------------------------}
 
 createHdRoot :: HdRoot -> Update DB (Either HD.CreateHdRootError ())
-createHdRoot hdRoot = runUpdate' . zoom dbHdWallets $
+createHdRoot hdRoot = runUpdateDiscardSnapshot . zoom dbHdWallets $
     HD.createHdRoot hdRoot
 
+createHdAccount :: HdAccount -> Update DB (Either HD.CreateHdAccountError ())
+createHdAccount hdAccount = runUpdateDiscardSnapshot . zoom dbHdWallets $
+    HD.createHdAccount hdAccount
+
 createHdAddress :: HdAddress -> Update DB (Either HD.CreateHdAddressError ())
-createHdAddress hdAddress = runUpdate' . zoom dbHdWallets $
+createHdAddress hdAddress = runUpdateDiscardSnapshot . zoom dbHdWallets $
     HD.createHdAddress hdAddress
 
-updateHdRootAssurance :: HdRootId
-                      -> AssuranceLevel
-                      -> Update DB (Either UnknownHdRoot ())
-updateHdRootAssurance rootId assurance = runUpdate' . zoom dbHdWallets $
-    HD.updateHdRootAssurance rootId assurance
+updateHdWallet :: HdRootId
+               -> AssuranceLevel
+               -> WalletName
+               -> Update DB (Either UnknownHdRoot (DB, HdRoot))
+updateHdWallet rootId assurance name = do
+    runUpdate' . zoom dbHdWallets $ do
+        HD.updateHdRoot rootId assurance name
 
-updateHdRootName :: HdRootId
-                 -> WalletName
-                 -> Update DB (Either UnknownHdRoot ())
-updateHdRootName rootId name = runUpdate' . zoom dbHdWallets $
-    HD.updateHdRootName rootId name
+updateHdRootPassword :: HdRootId
+                     -> HasSpendingPassword
+                     -> Update DB (Either UnknownHdRoot (DB, HdRoot))
+updateHdRootPassword rootId hasSpendingPassword = do
+    runUpdate' . zoom dbHdWallets $
+        HD.updateHdRootPassword rootId hasSpendingPassword
 
 updateHdAccountName :: HdAccountId
                     -> AccountName
-                    -> Update DB (Either UnknownHdAccount ())
-updateHdAccountName accId name = runUpdate' . zoom dbHdWallets $
-    HD.updateHdAccountName accId name
+                    -> Update DB (Either UnknownHdAccount (DB, HdAccount))
+updateHdAccountName accId name = do
+    runUpdate' . zoom dbHdWallets $ HD.updateHdAccountName accId name
 
-deleteHdRoot :: HdRootId -> Update DB ()
-deleteHdRoot rootId = runUpdateNoErrors . zoom dbHdWallets $
+deleteHdRoot :: HdRootId -> Update DB (Either UnknownHdRoot ())
+deleteHdRoot rootId = runUpdateDiscardSnapshot . zoom dbHdWallets $
     HD.deleteHdRoot rootId
 
-deleteHdAccount :: HdAccountId -> Update DB (Either UnknownHdRoot ())
-deleteHdAccount accId = runUpdate' . zoom dbHdWallets $
+-- | Deletes the 'HdAccount' identified by the input 'HdAccountId' together
+-- with all the linked addresses.
+deleteHdAccount :: HdAccountId -> Update DB (Either UnknownHdAccount ())
+deleteHdAccount accId = runUpdateDiscardSnapshot . zoom dbHdWallets $
     HD.deleteHdAccount accId
 
 {-------------------------------------------------------------------------------
@@ -389,12 +412,32 @@ makeAcidic ''DB [
       -- Updates on HD wallets
     , 'createHdRoot
     , 'createHdAddress
+    , 'createHdAccount
     , 'createHdWallet
-    , 'updateHdRootAssurance
-    , 'updateHdRootName
+    , 'updateHdWallet
+    , 'updateHdRootPassword
     , 'updateHdAccountName
     , 'deleteHdRoot
     , 'deleteHdAccount
       -- Testing
     , 'observableRollbackUseInTestsOnly
     ]
+
+{-------------------------------------------------------------------------------
+  Pretty-printing
+-------------------------------------------------------------------------------}
+
+instance Buildable NewPendingError where
+    build (NewPendingUnknown unknownAccount) =
+        bprint ("NewPendingUnknown " % build) unknownAccount
+    build (NewPendingFailed npf) =
+        bprint ("NewPendingFailed " % build) npf
+
+{-------------------------------------------------------------------------------
+  Arbitrary
+-------------------------------------------------------------------------------}
+
+instance Arbitrary NewPendingError where
+    arbitrary = oneof [ NewPendingUnknown <$> arbitrary
+                      , NewPendingFailed  <$> arbitrary
+                      ]

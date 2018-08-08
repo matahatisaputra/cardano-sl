@@ -97,6 +97,7 @@ import qualified Data.Aeson.Options as Serokell
 import           Data.Aeson.TH as A
 import           Data.Aeson.Types (toJSONKeyText, typeMismatch)
 import qualified Data.Char as C
+import qualified Data.IxSet.Typed as IxSet
 import           Data.Swagger as S
 import           Data.Swagger.Declare (Declare, look)
 import           Data.Swagger.Internal.Schema (GToSchema)
@@ -120,6 +121,8 @@ import           Test.QuickCheck.Random (mkQCGen)
 
 import           Cardano.Wallet.API.Types.UnitOfMeasure (MeasuredIn (..),
                      UnitOfMeasure (..))
+import           Cardano.Wallet.Kernel.DB.Util.IxSet (HasPrimKey (..),
+                     IndicesOf, OrdByPrimKey, ixFun, ixList)
 import           Cardano.Wallet.Orphans.Aeson ()
 
 -- V0 logic
@@ -132,7 +135,6 @@ import           Cardano.Wallet.Util (showApiUtcTime)
 import qualified Data.ByteArray as ByteArray
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
-import           Pos.Aeson.Core ()
 import qualified Pos.Client.Txp.Util as Core
 import           Pos.Core (addressF)
 import qualified Pos.Core as Core
@@ -772,6 +774,30 @@ data Wallet = Wallet {
     , walSyncState                  :: !SyncState
     } deriving (Eq, Ord, Show, Generic)
 
+--
+-- IxSet indices
+--
+
+-- FIXME(adn) Currently these indices are a necessary evil but in the future
+-- we won't even need to define them on V1 data types, as that would mean we
+-- will have to reconstructs all the indices when we convert from Kernel types
+-- to V1 types, which is computationally not efficient. See [CBR-356] for a
+-- broader discussion of the topic and for a proper design.
+instance HasPrimKey Wallet where
+    type PrimKey Wallet = WalletId
+    primKey = walId
+
+type SecondaryWalletIxs = '[Core.Coin, V1 Core.Timestamp]
+
+type instance IndicesOf Wallet = SecondaryWalletIxs
+
+instance IxSet.Indexable (WalletId ': SecondaryWalletIxs)
+                         (OrdByPrimKey Wallet) where
+    indices = ixList
+                (ixFun ((:[]) . unV1 . walBalance))
+                (ixFun ((:[]) . walCreatedAt))
+
+
 deriveJSON Serokell.defaultOptions ''Wallet
 
 instance ToSchema Wallet where
@@ -877,6 +903,23 @@ data Account = Account
     , accWalletId  :: !WalletId
     } deriving (Show, Ord, Eq, Generic)
 
+--
+-- IxSet indices
+--
+
+instance HasPrimKey Account where
+    type PrimKey Account = AccountIndex
+    primKey = accIndex
+
+type SecondaryAccountIxs = '[]
+
+type instance IndicesOf Account = SecondaryAccountIxs
+
+instance IxSet.Indexable (AccountIndex ': SecondaryAccountIxs)
+                         (OrdByPrimKey Account) where
+    indices = ixList
+
+
 accountsHaveSameId :: Account -> Account -> Bool
 accountsHaveSameId a b =
     accWalletId a == accWalletId b
@@ -907,7 +950,7 @@ instance BuildableSafeGen Account where
     buildSafeGen sl Account{..} = bprint ("{"
         %" index="%buildSafe sl
         %" name="%buildSafe sl
-        %" addresses="%buildSafeList sl
+        %" addresses="%buildSafe sl
         %" amount="%buildSafe sl
         %" walletId="%buildSafe sl
         %" }")

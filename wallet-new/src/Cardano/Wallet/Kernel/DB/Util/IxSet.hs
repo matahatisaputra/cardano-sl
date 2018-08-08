@@ -17,16 +17,22 @@ module Cardano.Wallet.Kernel.DB.Util.IxSet (
   , getEQ
   , member
   , size
+  , null
   , getOne
   , toMap
     -- * Construction
   , fromList
+  , singleton
   , omap
   , otraverse
+  , foldl'
   , emptyIxSet
+    -- * Destruction
+  , toList
   ) where
 
-import           Universum hiding (Foldable)
+import qualified Prelude
+import           Universum hiding (Foldable, foldl', null, toList)
 
 import qualified Control.Lens as Lens
 import           Data.Coerce (coerce)
@@ -37,6 +43,14 @@ import qualified Data.Map.Strict as Map
 import           Data.SafeCopy (SafeCopy (..))
 import qualified Data.Set as Set
 import qualified Data.Traversable
+
+-- Imports needed for the various instances
+import           Formatting (bprint, build)
+import qualified Formatting.Buildable
+import           Pos.Core.Util.LogSafe (BuildableSafe, SecureLog, buildSafeList,
+                     getSecureLog, secure)
+import           Serokell.Util (listJsonIndent)
+import           Test.QuickCheck (Arbitrary (..))
 
 {-# ANN module ("HLint: ignore Unnecessary hiding" :: Text) #-}
 
@@ -65,6 +79,9 @@ instance HasPrimKey a => Eq (OrdByPrimKey a) where
 instance HasPrimKey a => Ord (OrdByPrimKey a) where
   compare = compare `on` (primKey . unwrapOrdByPrimKey)
 
+instance Buildable a => Buildable (OrdByPrimKey a) where
+    build (WrapOrdByPrimKey o) = bprint build o
+
 {-------------------------------------------------------------------------------
   Wrap IxSet
 -------------------------------------------------------------------------------}
@@ -82,6 +99,9 @@ type family IndicesOf (a :: *) :: [*]
 newtype IxSet a = WrapIxSet {
       unwrapIxSet :: IxSet.IxSet (PrimKey a ': IndicesOf a) (OrdByPrimKey a)
     }
+
+instance Show a => Show (IxSet a) where
+    show = show . toList
 
 -- | Evidence that the specified indices are in fact available
 type Indexable a = IxSet.Indexable (PrimKey a ': IndicesOf a) (OrdByPrimKey a)
@@ -134,9 +154,6 @@ instance (HasPrimKey a, Indexable a) => Lens.At (IxSet a) where
       upd Nothing  = WrapIxSet $ IxSet.deleteIx pk                      s
       upd (Just a) = WrapIxSet $ IxSet.updateIx pk (WrapOrdByPrimKey a) s
 
-instance Foldable IxSet where
-    foldr f e = Data.Foldable.foldr f e . Data.Foldable.toList
-
 {-------------------------------------------------------------------------------
   Queries
 -------------------------------------------------------------------------------}
@@ -149,6 +166,10 @@ member pk = isJust . view (Lens.at pk)
 
 size :: IxSet a -> Int
 size = IxSet.size . unwrapIxSet
+
+-- | Whether or not this 'IxSet' contains no elements.
+null :: IxSet a -> Bool
+null = IxSet.null . unwrapIxSet
 
 -- | Safely returns the 'head' of this 'IxSet', but only if it is a singleton
 -- one, i.e. only if it has @exactly@ one element in it. Usually this is
@@ -175,6 +196,10 @@ toMap = Map.mapKeysMonotonic (primKey . unwrapOrdByPrimKey)
 fromList :: Indexable a => [a] -> IxSet a
 fromList = WrapIxSet . IxSet.fromList . coerce
 
+-- | Construct 'IxSet' from a single element
+singleton :: Indexable a => a -> IxSet a
+singleton = fromList . (:[])
+
 -- | Monomorphic map over an 'IxSet'
 --
 -- Since we assume that the primary keys never change, we do not need to
@@ -192,9 +217,57 @@ omap f =
 -- NOTE: This rebuilds the entire 'IxSet'. Potentially expensive.
 otraverse :: (Applicative f, Indexable a)
           => (a -> f a) -> IxSet a -> f (IxSet a)
-otraverse f = fmap fromList . Data.Traversable.traverse f . Data.Foldable.toList
+otraverse f = fmap fromList . Data.Traversable.traverse f . toList
 
 emptyIxSet :: forall a.
               Indexable a
            => IxSet a
 emptyIxSet = WrapIxSet IxSet.empty
+
+-- | Strict left fold over an 'IxSet'.
+foldl' :: (acc -> a -> acc)
+       -> acc
+       -> IxSet a
+       -> acc
+foldl' f initialValue (WrapIxSet nativeSet) =
+    Data.Foldable.foldl' (\acc (WrapOrdByPrimKey a) -> f acc a)
+                         initialValue
+                         nativeSet
+
+-- | Right fold
+foldrIxSet :: (a -> acc -> acc)
+           -> acc
+           -> IxSet a
+           -> acc
+foldrIxSet f initialValue (WrapIxSet nativeSet) =
+    Data.Foldable.foldr (\(WrapOrdByPrimKey a) acc -> f a acc)
+                        initialValue
+                        nativeSet
+
+instance Foldable IxSet where
+    foldr = foldrIxSet
+
+{-------------------------------------------------------------------------------
+  Destruction
+-------------------------------------------------------------------------------}
+
+-- | Converts the 'IxSet' back into a plain list. You need to use this function
+-- with care as unwrapping the 'IxSet' means losing the performance advantages
+-- of using it in the first place.
+-- You probably want to use this function only at application boundaries, i.e.
+-- before the data gets consumed by the web handlers.
+toList :: IxSet a -> [a]
+toList = coerce . IxSet.toList . unwrapIxSet
+
+{-------------------------------------------------------------------------------
+  Other miscellanea instances for IxSet
+-------------------------------------------------------------------------------}
+
+instance (Indexable a, Arbitrary a) => Arbitrary (IxSet a) where
+    arbitrary = fromList <$> arbitrary
+
+instance Buildable a => Buildable (IxSet a) where
+    build = bprint (listJsonIndent 4) . toList
+
+instance BuildableSafe a => Buildable (SecureLog (IxSet a)) where
+    build = bprint (buildSafeList secure) . toList . getSecureLog

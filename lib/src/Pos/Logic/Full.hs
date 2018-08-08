@@ -9,13 +9,14 @@ module Pos.Logic.Full
 import           Universum hiding (id)
 
 import           Control.Lens (at, to)
+import           Data.Conduit (ConduitT)
 import qualified Data.HashMap.Strict as HM
 import           Data.Tagged (Tagged (..), tagWith)
 import           Formatting (build, sformat, (%))
-import           Pipes (Producer)
 import           System.Wlog (WithLogger, logDebug)
 
-import           Pos.Chain.Block (HasBlockConfiguration)
+import           Pos.Chain.Block (Block, BlockHeader, HasBlockConfiguration,
+                     HeaderHash)
 import           Pos.Chain.Security (SecurityParams, shouldIgnorePkAddress)
 import           Pos.Chain.Ssc (MCCommitment (..), MCOpening (..),
                      MCShares (..), MCVssCertificate (..), SscTag (..),
@@ -24,7 +25,6 @@ import           Pos.Chain.Ssc (MCCommitment (..), MCOpening (..),
 import           Pos.Chain.Txp (MemPool (..), TxpConfiguration)
 import           Pos.Communication (NodeId)
 import           Pos.Core (HasConfiguration, StakeholderId, addressHash)
-import           Pos.Core.Block (Block, BlockHeader, HeaderHash)
 import           Pos.Core.Chrono (NE, NewestFirst, OldestFirst)
 import           Pos.Core.Delegation (ProxySKHeavy)
 import           Pos.Core.Ssc (getCertId, getCommitmentsMap, lookupVss)
@@ -106,7 +106,7 @@ logicFull pm txpConfig ourStakeholderId securityParams jsonLogTx =
         getSerializedBlock :: HeaderHash -> m (Maybe SerializedBlock)
         getSerializedBlock = DB.dbGetSerBlock
 
-        streamBlocks :: HeaderHash -> Producer SerializedBlock m ()
+        streamBlocks :: HeaderHash -> ConduitT () SerializedBlock m ()
         streamBlocks = Block.streamBlocks DB.dbGetSerBlock Block.resolveForwardLink
 
         getTip :: m Block

@@ -25,6 +25,7 @@ import           Formatting (bprint, build, sformat, (%))
 import qualified Formatting.Buildable
 
 import qualified Pos.Core as Core
+import           Pos.Core.Chrono
 
 import           Cardano.Wallet.Kernel.DB.HdWallet
 import           Cardano.Wallet.Kernel.DB.InDb
@@ -79,7 +80,7 @@ createHdRoot hdRoot =
 -- | Create a new account
 createHdAccount :: HdAccount -> Update' HdWallets CreateHdAccountError ()
 createHdAccount hdAccount = do
-    -- Check that the root ID exiwests
+    -- Check that the root ID exists
     zoomHdRootId CreateHdAccountUnknownRoot rootId $
       return ()
 
@@ -142,9 +143,12 @@ initHdAccount :: HdAccountId
               -> Checkpoint
               -> HdAccount
 initHdAccount accountId checkpoint = HdAccount {
-      _hdAccountId          = accountId
-    , _hdAccountName        = defName
-    , _hdAccountCheckpoints = checkpoint :| []
+      _hdAccountId    = accountId
+    , _hdAccountName  = defName
+    , _hdAccountState = HdAccountStateUpToDate
+                      $ HdAccountUpToDate
+                      $ NewestFirst
+                      $ checkpoint :| []
     }
   where
     defName = AccountName $ sformat ("Account: " % build)
@@ -163,10 +167,8 @@ initHdAddress :: HdAddressId
               -> InDb Core.Address
               -> HdAddress
 initHdAddress addrId address = HdAddress {
-      _hdAddressId       = addrId
-    , _hdAddressAddress  = address
-    , _hdAddressIsUsed   = error "TODO: _hdAddressIsUsed"
-    , _hdAddressIsChange = error "TODO: _hdAddressIsChange"
+      _hdAddressId      = addrId
+    , _hdAddressAddress = address
     }
 
 {-------------------------------------------------------------------------------

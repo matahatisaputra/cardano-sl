@@ -8,8 +8,6 @@
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE TypeSynonymInstances       #-}
 
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-
 -- | Some types for json logging.
 module Pos.Core.JsonLog.LogEvents
        ( HasJsonLogConfig (..)
@@ -23,8 +21,6 @@ module Pos.Core.JsonLog.LogEvents
        , JsonLogConfig (..)
        , MemPoolModifyReason (..)
        , appendJL
-       , jlAdoptedBlock
-       , jlCreatedBlock
        , jsonLogConfigFromHandle
        , jsonLogDefault
        , fromJLSlotId
@@ -34,7 +30,6 @@ module Pos.Core.JsonLog.LogEvents
 import           Universum
 
 import           Control.Monad.Except (MonadError)
-import           Control.Monad.Trans.Identity (IdentityT (..))
 import           Data.Aeson (FromJSON, ToJSON, Value (..), encode, parseJSON,
                      toEncoding, (.:))
 import           Data.Aeson.Encoding.Internal (pairStr, pairs)
@@ -43,21 +38,12 @@ import           Data.Aeson.TH (deriveJSON)
 import           Data.Aeson.Types (typeMismatch)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.HashMap.Strict as HMS
-import qualified Ether
-import           Formatting (sformat)
 import           System.Wlog (WithLogger)
 
 import           Pos.Core (EpochIndex (..), HasConfiguration, SlotId (..),
-                     getSlotIndex, mkLocalSlotIndex)
-import           Pos.Core.Block (Block, HeaderHash, gbHeader, gbhPrevBlock,
-                     headerHash, headerHashF, mainBlockTxPayload)
-import           Pos.Core.Block.Genesis (genBlockEpoch)
-import           Pos.Core.Block.Union (mainBlockSlot)
-import           Pos.Core.JsonLog.CanJsonLog (CanJsonLog)
+                     mkLocalSlotIndex)
 import           Pos.Core.JsonLog.JsonLogT (JsonLogConfig (..))
 import qualified Pos.Core.JsonLog.JsonLogT as JL
-import           Pos.Core.Txp (txpTxs)
-import           Pos.Crypto (hash, hashHexF)
 import           Pos.Util.Util (realTime)
 
 type BlockId = Text
@@ -199,39 +185,11 @@ fromJLSlotIdUnsafe x = case fromJLSlotId x of
     Right y -> y
     Left  _ -> error "illegal slot id"
 
--- | Return event of created block.
-jlCreatedBlock :: HasConfiguration => Block -> JLEvent
-jlCreatedBlock block = JLCreatedBlock $ JLBlock {..}
-  where
-    jlHash = showHeaderHash $ headerHash block
-    jlPrevBlock = showHeaderHash $ case block of
-        Left  gB -> view gbhPrevBlock (gB ^. gbHeader)
-        Right mB -> view gbhPrevBlock (mB ^. gbHeader)
-    jlSlot = (getEpochIndex $ siEpoch slot, getSlotIndex $ siSlot slot)
-    jlTxs = case block of
-              Left _   -> []
-              Right mB -> map fromTx . toList $ mB ^. mainBlockTxPayload . txpTxs
-    slot :: SlotId
-    slot = case block of
-        Left  gB -> let slotZero = case mkLocalSlotIndex 0 of
-                                        Right sz -> sz
-                                        Left _   -> error "impossible branch"
-                    in SlotId (gB ^. genBlockEpoch) slotZero
-        Right mB -> mB ^. mainBlockSlot
-    fromTx = sformat hashHexF . hash
-
-showHeaderHash :: HeaderHash -> Text
-showHeaderHash = sformat headerHashF
-
 -- | Append event into log by given 'FilePath'.
 appendJL :: (MonadIO m) => FilePath -> JLEvent -> m ()
 appendJL path ev = liftIO $ do
   time <- realTime -- TODO: Do we want to mock time in logs?
   LBS.appendFile path . encode $ JLTimedEvent (fromIntegral time) ev
-
--- | Returns event of created 'Block'.
-jlAdoptedBlock :: Block -> JLEvent
-jlAdoptedBlock = JLAdoptedBlock . showHeaderHash . headerHash
 
 jsonLogConfigFromHandle :: MonadIO m => Handle -> m JsonLogConfig
 jsonLogConfigFromHandle h = do
@@ -248,9 +206,3 @@ jsonLogDefault
 jsonLogDefault x = do
     jlc <- view jsonLogConfig
     JL.jsonLogDefault jlc x
-
-deriving instance CanJsonLog (t m) => CanJsonLog (Ether.TaggedTrans tag t m)
-
--- Required for @Explorer@ @BListener@ and @ExtraContext@ redirect
-deriving instance CanJsonLog m => CanJsonLog (Ether.TaggedTrans tag IdentityT m)
-deriving instance CanJsonLog m => CanJsonLog (Ether.ReaderT tag r m)
