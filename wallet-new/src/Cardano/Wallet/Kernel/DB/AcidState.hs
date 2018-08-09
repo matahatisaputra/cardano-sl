@@ -125,13 +125,31 @@ deriveSafeCopy 1 'base ''RollbackDuringRestoration
   Wrap wallet spec
 -------------------------------------------------------------------------------}
 
+
+-- | Create a new pending transaction
+--
+--  NOTE: also creates all "our" addresses that appear in the transaction outputs,
+--        by adding them to the HdAddresses they will be henceforth recognised as "ours"
 newPending :: HdAccountId
            -> InDb Txp.TxAux
+           -> [AddrWithId] -- ^ "our" addresses that appear in the transaction outputs
            -> Update DB (Either NewPendingError ())
-newPending accountId tx = runUpdateDiscardSnapshot . zoom dbHdWallets $
+newPending accountId tx ourAddrs = runUpdateDiscardSnapshot . zoom dbHdWallets $ do
     zoomHdAccountId NewPendingUnknown accountId $
     zoomHdAccountCheckpoints $
       mapUpdateErrors NewPendingFailed $ Spec.newPending tx
+
+    mapM_ initHdAddress' ourAddrs
+    where
+        initHdAddress' (addressId, address) = do
+            let newAddress :: HdAddress
+                newAddress = HD.initHdAddress addressId (InDb address)
+
+            zoomOrCreateHdAddress
+                assumeHdAccountExists
+                newAddress
+                addressId
+                (return ())
 
 newForeign :: HdAccountId
            -> InDb Txp.TxAux
