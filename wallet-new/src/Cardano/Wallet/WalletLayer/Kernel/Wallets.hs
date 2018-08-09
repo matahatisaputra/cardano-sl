@@ -9,18 +9,20 @@ module Cardano.Wallet.WalletLayer.Kernel.Wallets (
 
 import           Universum
 
+import           Control.Concurrent.Async (async, link)
 import           Control.Lens (to)
 import           Data.Coerce (coerce)
 import           Data.Time.Units (Second)
 import           Formatting (build, sformat)
 
-import           Pos.Core (decodeTextAddress, mkCoin)
+import           Pos.Core (decodeTextAddress)
 import           Pos.Crypto.Signing
 
 import           Cardano.Wallet.API.V1.Types (V1 (..))
 import qualified Cardano.Wallet.API.V1.Types as V1
 import qualified Cardano.Wallet.Kernel as Kernel
 import qualified Cardano.Wallet.Kernel.Accounts as Kernel
+import qualified Cardano.Wallet.Kernel.BIP39 as BIP39
 import qualified Cardano.Wallet.Kernel.DB.HdWallet as HD
 import           Cardano.Wallet.Kernel.DB.HdWallet.Read (readAllHdRoots,
                      readHdRoot)
@@ -28,8 +30,10 @@ import           Cardano.Wallet.Kernel.DB.InDb (InDb (..), fromDb)
 import           Cardano.Wallet.Kernel.DB.Read (hdWallets)
 import           Cardano.Wallet.Kernel.DB.Util.IxSet (IxSet)
 import qualified Cardano.Wallet.Kernel.DB.Util.IxSet as IxSet
+import           Cardano.Wallet.Kernel.Decrypt (eskToWalletDecrCredentials)
+import           Cardano.Wallet.Kernel.Restore (restoreWalletBalance,
+                     restoreWalletHistory)
 import           Cardano.Wallet.Kernel.Types (WalletId (..))
-import           Cardano.Wallet.Kernel.Util.Core (getCurrentTimestamp)
 import qualified Cardano.Wallet.Kernel.Wallets as Kernel
 import           Cardano.Wallet.WalletLayer.ExecutionTimeLimit
                      (limitExecutionTimeTo)
@@ -41,53 +45,49 @@ createWallet :: MonadIO m
              => Kernel.PassiveWallet
              -> V1.NewWallet
              -> m (Either CreateWalletError V1.Wallet)
-createWallet wallet (V1.NewWallet (V1.BackupPhrase mnemonic) mbSpendingPassword v1AssuranceLevel v1WalletName operation) = do
+createWallet wallet (V1.NewWallet (V1.BackupPhrase mnemonic) mbSpendingPassword v1AssuranceLevel v1WalletName operation) =
     liftIO $ limitExecutionTimeTo (30 :: Second) CreateWalletTimeLimitReached $ do
-        case operation of
-             V1.RestoreWallet -> error "Not implemented, see [CBR-243]."
-             V1.CreateWallet  -> do
-                 let spendingPassword = maybe emptyPassphrase coerce mbSpendingPassword
-                 let hdAssuranceLevel = case v1AssuranceLevel of
-                       V1.NormalAssurance -> HD.AssuranceLevelNormal
-                       V1.StrictAssurance -> HD.AssuranceLevelStrict
 
-                 res <- liftIO $ Kernel.createHdWallet wallet
-                                                       mnemonic
-                                                       spendingPassword
-                                                       hdAssuranceLevel
-                                                       (HD.WalletName v1WalletName)
-                 case res of
-                      Left kernelError ->
-                          return (Left $ CreateWalletError kernelError)
-                      Right hdRoot -> do
-                          let rootId = hdRoot ^. HD.hdRootId
-                          -- Populate this wallet with an account by default
-                          newAccount <- liftIO $ Kernel.createAccount spendingPassword
-                                                                      (HD.AccountName "Default account")
-                                                                      (WalletIdHdRnd rootId)
-                                                                      wallet
-                          case newAccount of
-                               Left accCreationFailed ->
-                                   return (Left $ CreateWalletFirstAccountCreationFailed accCreationFailed)
-                               Right _ -> do
-                                   let (hasSpendingPassword, mbLastUpdate) =
-                                           case hdRoot ^. HD.hdRootHasPassword of
-                                                HD.NoSpendingPassword -> (False, Nothing)
-                                                HD.HasSpendingPassword lu -> (True, Just (lu ^. fromDb))
-                                   now <- liftIO getCurrentTimestamp
-                                   let lastUpdate = fromMaybe now mbLastUpdate
-                                   let createdAt  = hdRoot ^. HD.hdRootCreatedAt . fromDb
-                                   let walletId = hdRoot ^. HD.hdRootId . to (sformat build . _fromDb . HD.getHdRootId)
-                                   return $ Right V1.Wallet {
-                                       walId                         = (V1.WalletId walletId)
-                                     , walName                       = v1WalletName
-                                     , walBalance                    = V1 (mkCoin 0)
-                                     , walHasSpendingPassword        = hasSpendingPassword
-                                     , walSpendingPasswordLastUpdate = V1 lastUpdate
-                                     , walCreatedAt                  = V1 createdAt
-                                     , walAssuranceLevel             = v1AssuranceLevel
-                                     , walSyncState                  = V1.Synced
-                                   }
+        let hdAssuranceLevel = case v1AssuranceLevel of
+                V1.NormalAssurance -> HD.AssuranceLevelNormal
+                V1.StrictAssurance -> HD.AssuranceLevelStrict
+            spendingPassword = maybe emptyPassphrase coerce mbSpendingPassword
+
+        res <- liftIO $ Kernel.createHdWallet wallet
+                                              mnemonic
+                                              spendingPassword
+                                              hdAssuranceLevel
+                                              (HD.WalletName v1WalletName)
+        case res of
+            Left kernelError ->
+              return (Left $ CreateWalletError kernelError)
+            Right hdRoot -> do
+                let rootId = hdRoot ^. HD.hdRootId
+                    wId    = WalletIdHdRnd rootId
+                -- Populate this wallet with an account by default
+                newAccount <- liftIO $ Kernel.createAccount spendingPassword
+                                                            (HD.AccountName "Default account")
+                                                            wId
+                                                            wallet
+                case newAccount of
+                    Left accCreationFailed ->
+                        return (Left $ CreateWalletFirstAccountCreationFailed accCreationFailed)
+                    Right _ -> do
+                        when (operation == V1.RestoreWallet) $ do
+                            -- Synchronously restore the wallet balance.
+                            -- TODO (@mn): and what should happen if the restoration was interrupted here,
+                            --             before restoring the balance? I suppose the user could just restore again,
+                            --             but there would be no indication that the
+                            let (_,esk) = safeDeterministicKeyGen (BIP39.mnemonicToSeed mnemonic) spendingPassword
+                                wdc = eskToWalletDecrCredentials esk
+                            restoreWalletBalance wallet hdRoot (wId, wdc)
+                            -- Begin to asychronously reconstruct the wallet history.
+                            _ <- link =<< async (restoreWalletHistory wallet hdRoot)
+                            return ()
+
+                        -- Grab a snapshot of new wallet
+                        snapshot <- Kernel.getWalletSnapshot wallet
+                        return (Right $ toV1Wallet snapshot hdRoot)
 
 -- | Updates the 'SpendingPassword' for this wallet.
 updateWallet :: MonadIO m
