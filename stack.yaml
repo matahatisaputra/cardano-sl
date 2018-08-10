@@ -56,7 +56,7 @@ packages:
 
 - location:
     git: https://github.com/anviking/cardano-crypto # FIXME: Don't use fork
-    commit: 30be7df3f05553d20d6b01ee7cafa3bed1a84394
+    commit: 6b0397c66259ddb1f057423c4af01ae356088302
   extra-dep: true
 # to be removed when haskell-ip is in the current stackage version
 - location:
