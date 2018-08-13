@@ -1,5 +1,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Miscellaneous instances, etc. Related to the main blockchain of course.
 
 module Pos.Chain.Block.Main.Instances
