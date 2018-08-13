@@ -1,10 +1,9 @@
 module Test.Pos.Core.Json where
 
 import qualified Cardano.Crypto.Wallet as CC
-import           Crypto.Error (CryptoFailable (..))
-import qualified Crypto.PubKey.Ed25519 as Ed25519
 import           Data.Fixed
 import qualified Data.HashMap.Strict as HM
+import           Data.Maybe (fromJust)
 import           Data.Time.Units (Millisecond)
 import           Hedgehog (Property)
 import qualified Hedgehog as H
@@ -25,7 +24,8 @@ import           Pos.Core.Update (BlockVersionData (..), SoftforkRule (..))
 import           Pos.Crypto (ProtocolMagic (..))
 import           Pos.Crypto.Hashing (abstractHash)
 import           Pos.Crypto.Signing (ProxyCert (..), ProxySecretKey (..),
-                     PublicKey (..), RedeemPublicKey (..))
+                     PublicKey (..), RedeemPublicKey (..),
+                     redeemDeterministicKeyGen)
 import           Serokell.Data.Memory.Units (Byte)
 import           Test.Pos.Core.Bi (feedPM)
 import           Test.Pos.Core.Gen (genBlockVersionData, genByte, genCoin,
@@ -219,19 +219,19 @@ exampleGenesisConfiguration_GCSpec =
 
 exampleGenesisAvvmBalances :: GenesisAvvmBalances
 exampleGenesisAvvmBalances =
-    GenesisAvvmBalances {getGenesisAvvmBalances =
-        HM.fromList [(RedeemPublicKey (unsafePublicKey fstRedKey)
-                     , Coin {getCoin = 36524597913081152})
-                     ,(RedeemPublicKey (unsafePublicKey sndRedKey)
-                     ,Coin {getCoin = 37343863242999412})
-                     ] }
+    GenesisAvvmBalances
+        { getGenesisAvvmBalances = HM.fromList
+            [ ( exampleRedeemPublicKey 32
+              , Coin {getCoin = 36524597913081152}
+              )
+            , ( exampleRedeemPublicKey 32
+              , Coin {getCoin = 37343863242999412}
+              )
+            ]
+        }
   where
-    unsafePublicKey :: ByteString -> Ed25519.PublicKey
-    unsafePublicKey bytes = case Ed25519.publicKey bytes of
-        CryptoFailed e -> error (show e)
-        CryptoPassed r -> r
-    fstRedKey = "\254\156\235\217{]\130W\183LfJ\240"
-    sndRedKey = "\254\156\235\217{]\130W\183LfJ\240\RS\224"
+    exampleRedeemPublicKey :: Int -> RedeemPublicKey
+    exampleRedeemPublicKey n = fromJust (fst <$> redeemDeterministicKeyGen (getBytes 0 n))
 
 exampleSharedSeed :: SharedSeed
 exampleSharedSeed = SharedSeed (getBytes 8 32)
