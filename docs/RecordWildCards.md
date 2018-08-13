@@ -1,5 +1,42 @@
 # Packages that use the `RecordWildCard` extension
 
+## `auxx` package
+| File | Types | Type Definition Location |
+| --- | --- | ---|
+|src/Plugin.hs|AuxxOptions| auxx/src/AuxxOptions.hs|
+|src/Plugin.hs|WithCommandAction|auxx/src/Repl.hs|
+|src/Plugin.hs|SendActions|infra/src/Pos/Infra/Communication/Types/Protocol.hs|
+|src/Plugin.hs|ConversationActions|networking/src/Node/Conversation.hs|
+|src/Lang/Lexer.hs|SourcePos| Megaparsec|
+|src/Lang/Lexer.hs|BlockVersion|core/src/Pos/Core/Update/BlockVersion.hs|
+|src/Lang/Lexer.hs|SoftwareVersion |core/src/Pos/Core/Update/SoftwareVersion.hs|
+|src/Lang/Argument.hs|ArgumentError| Same module|
+|src/Lang/Argument.hs|ProcError| Same module|
+|src/Lang/DisplayError.hs|TypeError|auxx/src/Lang/Argument.hs|
+|src/Lang/DisplayError.hs|ArgumentError|auxx/src/Lang/Argument.hs|
+|src/Lang/DisplayError.hs|ProcError|auxx/src/Lang/Argument.hs|
+|src/Lang/DisplayError.hs|Report | Earley |
+|src/Lang/Interpreter.hs|CommandProc|auxx/src/Lang/Command.hs|
+|src/Command/Help.hs|CommandProc|auxx/src/Lang/Command.hs|
+|src/Command/Help.hs|UnavailableCommand|auxx/src/Lang/Command.hs|
+|src/Command/Update.hs|ProposeUpdateParams|auxx/src/Lang/Value.hs|
+|src/Command/Update.hs|ProposeUpdateSystem|auxx/src/Lang/Value.hs|
+|src/Command/BlockGen.hs|GenBlocksParams|auxx/src/Lang/Value.hs|
+|src/AuxxOptions.hs|AuxxOptions | Same module|
+|src/Repl.hs|WithCommandAction| Same module|
+|src/Command/Proc.hs|TxOut|core/src/Pos/Core/Txp/TxOutAux.hs|
+|src/Command/Proc.hs|SendToAllGenesisParams|auxx/src/Command/Tx.hs|
+|src/Command/Proc.hs|BlockVersionModifier|core/src/Pos/Core/Update/BlockVersionModifier.hs |
+|src/Command/Proc.hs|ProposeUpdateSystem|auxx/src/Lang/Value.hs|
+|src/Command/Proc.hs|SoftwareVersion|core/src/Pos/Core/Update/SoftwareVersion.hs|
+|src/Command/Proc.hs|ProposeUpdateParams|auxx/src/Lang/Value.hs|
+|src/Command/Proc.hs|GenBlocksParams|auxx/src/Lang/Value.hs|
+|src/Command/Proc.hs|AddKeyParams |auxx/src/Lang/Value.hs
+|src/Command/Proc.hs|RollbackParams|auxx/src/Lang/Value.hs|
+|Main.hs|AuxxOptions |auxx/src/AuxxOptions.hs|
+|Main.hs|NodeContext |lib/src/Pos/Context/Context.hs|
+|Main.hs|CommonNodeArgs |lib/src/Pos/Client/CLI/NodeOptions.hs|
+
 ## `chain` package
 ### File path prefix: src/Pos/Chain
 
@@ -28,8 +65,7 @@
 |Delegation/Types.hs|DlgUndo|chain/src/Pos/Chain/Delegation/Types.hs|
 |Block/Blockchain.hs|GenericBlockHeader b (UnsafeGenericBlockHeader), GenericBlock b (UnsafeGenericBlock) | Same module
 |Block/Union/Types.hs|GenericBlockHeader b (UnsafeGenericBlockHeader) |chain/src/Pos/Chain/Block/Blockchain.hs|
-|Block/Union/Types.hs|GenesisConsensusData |chain/src/Pos/Chain/Block/Genesis/Types.hs
-|
+|Block/Union/Types.hs|GenesisConsensusData |chain/src/Pos/Chain/Block/Genesis/Types.hs|
 |Block/Union/Types.hs|MainBody|chain/src/Pos/Chain/Block/Main/Types.hs|
 |Block/Union/Types.hs|MainConsensusData |Same module|
 |Txp/Toil/Stakes.hs|UnsafeTx |core/src/Pos/Core/Txp/Tx.hs|
