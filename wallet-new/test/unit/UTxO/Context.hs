@@ -27,9 +27,10 @@ module UTxO.Context (
   , TransCtxt(..)
   , initContext
     -- * Derived information
+  , leaderForSlot
   , resolveAddr
   , resolveAddress
-  , leaderForSlot
+  , transCtxtAddrs
     -- ** Block sign info
   , BlockSignInfo(..)
   , blockSignInfo
@@ -461,7 +462,7 @@ initAddrMap Actors{..} = AddrMap{
             addrIx0 = wAddressGenesisIndex
             poorSec = encKpEnc poorKey
 
-            numPoorAddrs = 10 -- TODO @uroboros/ryan this must be aligned with number used when constructing a cardanoModel
+            numPoorAddrs = 10 -- 10 addresses for each Poor actor
             addrIxs = map (\i -> (i, addrIx0 + (fromIntegral i)) )
                           [0 .. numPoorAddrs - 1]
 
@@ -517,6 +518,15 @@ initContext tcCardano = TransCtxt{..}
   where
     tcActors  = initActors  tcCardano
     tcAddrMap = initAddrMap tcActors
+
+-- | All actor addresses present in the translation context
+transCtxtAddrs :: TransCtxt -> [Addr]
+transCtxtAddrs transCtxt = filter (not . avvm) addrs
+    where
+        addrs = Map.keys $ addrMap (tcAddrMap transCtxt)
+
+        avvm (Addr (IxAvvm _) _) = True
+        avvm _                   = False
 
 {-------------------------------------------------------------------------------
   Derived information

@@ -6,10 +6,6 @@ import           Universum
 
 import qualified Data.Set as Set
 
-import           Control.Exception (throw)
-
-import           Formatting (sformat, build, (%))
-
 import qualified Cardano.Wallet.Kernel as Kernel
 import           Cardano.Wallet.Kernel.DB.BlockMeta (BlockMeta)
 import qualified Cardano.Wallet.Kernel.Diffusion as Kernel
@@ -72,8 +68,7 @@ spec =
     boot      = bootstrapTransaction transCtxt
 
     ourActorIx   = 0
-    numPoorAddrs = 10
-    model        = (cardanoModel linearFeePolicy ourActorIx numPoorAddrs boot)
+    model        = (cardanoModel linearFeePolicy ourActorIx (transCtxtAddrs transCtxt) boot)
 
     -- TODO: These constants should not be hardcoded here.
     linearFeePolicy :: TxSizeLinear

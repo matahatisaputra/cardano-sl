@@ -12,8 +12,6 @@ module Test.Infrastructure.Generator (
 
 import           Universum
 
-import qualified Data.Map as Map
-
 import qualified Data.Set as Set
 import           Test.QuickCheck
 
@@ -114,46 +112,19 @@ simpleModel = GeneratorModel {
 -- actors, large values, etc., and so is a bit difficult to debug when
 -- looking at values manually.
 cardanoModel :: TxSizeLinear
-             -> Int -- ^ "our" actor, the owner of all "our" addresses
-             -> Int -- ^ number of addresses to create for poor actors
+             -> Int    -- ^ "our" actor, the owner of all "our" addresses
+             -> [Addr] -- ^ list of all addresses (including "ours")
              -> Transaction GivenHash Addr
              -> GeneratorModel GivenHash Addr
-cardanoModel linearFeePolicy ourActor numPoorAddrs boot =
+cardanoModel linearFeePolicy ourActor allAddrs boot =
     GeneratorModel {
       gmBoot          = boot
-    , gmAllAddresses  = richAddrs ++ concat (Map.elems poorAddrs)
+    , gmAllAddresses  = allAddrs
     , gmOurs          = Set.fromList ourAddrs
     , gmEstimateFee   = estimateCardanoFee linearFeePolicy
     }
     where
-        Just ourAddrs = Map.lookup ourActor poorAddrs
-        (rich, poor) = actorsInBoot boot
+        ours (Addr (IxPoor actor) _) = (ourActor == actor)
+        ours _                       = False
 
-        richAddrs :: [Addr]
-        richAddrs = [(Addr (IxRich r) 0) | r <- rich]
-
-        poorAddrs :: Map Int [Addr]
-        poorAddrs = Map.fromListWith (++) $
-                        [ (p, [ (Addr (IxPoor p) i)
-                              | i <- [0 .. numPoorAddrs - 1]
-                              ])
-                        | p <- poor
-                        ]
-
-{-------------------------------------------------------------------------------
-  Auxiliary
--------------------------------------------------------------------------------}
-
--- | The rich and poor actors in the bootstrap transaction
-actorsInBoot :: Transaction GivenHash Addr -> ([Int], [Int])
-actorsInBoot boot = foldl f ([],[]) (addrsInBoot boot)
-    where
-        f (richIxs, poorIxs) (Addr (IxPoor actorIx) _) =
-            (richIxs, actorIx:poorIxs)
-        f (richIxs, poorIxs) (Addr (IxRich actorIx) _) =
-            (actorIx:richIxs, poorIxs)
-        f acc (Addr _ _) =
-            acc
-
-addrsInBoot :: Transaction GivenHash a -> [a]
-addrsInBoot = map outAddr . trOuts
+        ourAddrs = filter ours allAddrs

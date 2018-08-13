@@ -49,6 +49,7 @@ import qualified Formatting.Buildable
 import           Test.QuickCheck (Arbitrary (..), oneof)
 
 import           Pos.Chain.Txp (Utxo)
+import           Pos.Core (Address)
 import           Pos.Core.Chrono (OldestFirst (..))
 import qualified Pos.Core.Txp as Txp
 
@@ -98,6 +99,8 @@ defDB = DB initHdWallets
   Custom errors
 -------------------------------------------------------------------------------}
 
+-- TODO NewPending ...MissingKey (note: should not happen)
+
 -- | Errors thrown by 'newPending'
 data NewPendingError =
     -- | Unknown account
@@ -106,6 +109,9 @@ data NewPendingError =
     -- | Some inputs are not in the wallet utxo
   | NewPendingFailed Spec.NewPendingFailed
 
+  -- | Could not find the key for the account to which this pending transaction is being submitted
+  | NewPendingMissingKey HdAccountId
+
 -- | Errors thrown by 'newForeign'
 data NewForeignError =
     -- | Unknown account
@@ -113,6 +119,9 @@ data NewForeignError =
 
     -- | Some inputs are not in the wallet utxo
   | NewForeignFailed Spec.NewForeignFailed
+
+    -- | Could not find the key for the account to which this pending transaction is being submitted
+  | NewForeignMissingKey HdAccountId
 
 -- | We cannot roll back  when we don't have full historical data available
 data RollbackDuringRestoration = RollbackDuringRestoration
@@ -136,28 +145,32 @@ newPending :: HdAccountId
            -> Update DB (Either NewPendingError ())
 newPending accountId tx ourAddrs = runUpdateDiscardSnapshot . zoom dbHdWallets $ do
     zoomHdAccountId NewPendingUnknown accountId $
-    zoomHdAccountCheckpoints $
-      mapUpdateErrors NewPendingFailed $ Spec.newPending tx
+        zoomHdAccountCheckpoints $
+            mapUpdateErrors NewPendingFailed $ Spec.newPending tx
 
     mapM_ initHdAddress' ourAddrs
-    where
-        initHdAddress' (addressId, address) = do
-            let newAddress :: HdAddress
-                newAddress = HD.initHdAddress addressId (InDb address)
-
-            zoomOrCreateHdAddress
-                assumeHdAccountExists
-                newAddress
-                addressId
-                (return ())
 
 newForeign :: HdAccountId
            -> InDb Txp.TxAux
+           -> [AddrWithId] -- ^ "our" addresses that appear in the transaction outputs
            -> Update DB (Either NewForeignError ())
-newForeign accountId tx = runUpdateDiscardSnapshot . zoom dbHdWallets $
+newForeign accountId tx ourAddrs = runUpdateDiscardSnapshot . zoom dbHdWallets $ do
     zoomHdAccountId NewForeignUnknown accountId $
-    zoomHdAccountCheckpoints $
-      mapUpdateErrors NewForeignFailed $ Spec.newForeign tx
+        zoomHdAccountCheckpoints $
+            mapUpdateErrors NewForeignFailed $ Spec.newForeign tx
+
+    mapM_ initHdAddress' ourAddrs
+
+initHdAddress' :: (HdAddressId,Address) -> Update' HdWallets e ()
+initHdAddress' (addressId, address) = do
+    let newAddress :: HdAddress
+        newAddress = HD.initHdAddress addressId (InDb address)
+
+    zoomOrCreateHdAddress
+        assumeHdAccountExists
+        newAddress
+        addressId
+        (return ())
 
 -- | Cancels the input transactions from the 'Checkpoints' of each of
 -- the accounts cointained in the 'Cancelled' map.
@@ -470,6 +483,8 @@ instance Buildable NewPendingError where
         bprint ("NewPendingUnknown " % build) unknownAccount
     build (NewPendingFailed npf) =
         bprint ("NewPendingFailed " % build) npf
+    build (NewPendingMissingKey accId) =
+        bprint ("NewPendingMissingKey " % build) accId
 
 {-------------------------------------------------------------------------------
   Arbitrary

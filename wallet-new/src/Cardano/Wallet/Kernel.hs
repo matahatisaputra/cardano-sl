@@ -33,6 +33,8 @@ module Cardano.Wallet.Kernel (
 
 import           Universum hiding (State, init)
 
+import qualified Data.List.NonEmpty as NE
+
 import           Control.Concurrent.Async (async, cancel)
 import           Control.Concurrent.MVar (modifyMVar, modifyMVar_)
 import           Data.Acid (AcidState)
@@ -44,12 +46,12 @@ import           System.Wlog (Severity (..))
 import           Pos.Core (ProtocolMagic)
 import           Pos.Core.Chrono (OldestFirst)
 import           Pos.Core.Txp (Tx (..), TxAux (..), TxOut (..))
-import           Pos.Crypto (EncryptedSecretKey, hash)
+import           Pos.Crypto (EncryptedSecretKey)
 import           Pos.Wallet.Web.Tracking.Decrypt (eskToWalletDecrCredentials)
 
 import           Cardano.Wallet.Kernel.DB.AcidState (ApplyBlock (..),
-                     CancelPending (..), DB, NewForeign (..), NewForeignError,
-                     NewPending (..), NewPendingError,
+                     CancelPending (..), DB, NewForeign (..), NewForeignError (..),
+                     NewPending (..), NewPendingError (..),
                      ObservableRollbackUseInTestsOnly (..),
                      RollbackDuringRestoration, Snapshot (..),
                      SwitchToFork (..), defDB)
@@ -221,56 +223,70 @@ bracketActiveWallet walletProtocolMagic walletPassive walletDiffusion runActiveW
                 cancelPending walletPassive cancelled
             sendTransactions toSend
 
--- | Submit a new pending transaction
+-- | Submit a new transaction
 --
 -- Will fail if the HdAccountId does not exist or if some inputs of the
 -- new transaction are not available for spending.
+--
+-- If the transaction is successfully added to the wallet state, the
+-- submission layer is notified accordingly.
+--
+-- NOTE: we select "our" output addresses from the transaction and pass it along to the data layer
+newTx :: ActiveWallet
+      -> HdAccountId
+      -> TxAux
+      -> e                                  -- ^ value to return on missing key error
+      -> ([AddrWithId] -> IO (Either e ())) -- Update function, takes ourAddrs as arg
+      -> IO (Either e ())
+newTx ActiveWallet{..} accountId tx missingKeyErr upd = do
+    withKeystore walletPassive $ \ks -> do
+        mbEsk <- Keystore.lookup wid ks
+        case mbEsk of
+            Nothing  ->
+                return $ Left missingKeyErr
+            Just esk -> do
+                res <- upd (ourAddrs esk)
+                case res of
+                    Left e -> return (Left e)
+                    Right () -> do
+                        submitTx accountId tx
+                        return $ Right ()
+    where
+        addrs = NE.toList $ map txOutAddress (_txOutputs . taTx $ tx)
+        wid   = WalletIdHdRnd (accountId ^. hdAccountIdParent)
+
+        ourAddrs :: EncryptedSecretKey -> [AddrWithId]
+        ourAddrs esk' =
+            map swap $ prefilter wKey identity addrs
+            where
+                wKey = (wid, eskToWalletDecrCredentials esk')
+
+        submitTx :: HdAccountId -> TxAux -> IO ()
+        submitTx accountId' tx' =
+            modifyMVar_ walletSubmission (return . addPending accountId' (Pending.singleton tx'))
+
+-- | Submit a new pending transaction
 --
 -- If the pending transaction is successfully added to the wallet state, the
 -- submission layer is notified accordingly.
 --
 -- NOTE: we select "our" output addresses from the transaction and pass it along to the data layer
-newPending :: ActiveWallet -> HdAccountId -> TxAux -> IO (Either NewPendingError ())
-newPending ActiveWallet{..} accountId tx = do
-    withKeystore walletPassive $ \ks -> do
-        esk <- lookupESK ks
-        res <- update' (walletPassive ^. wallets) $ NewPending accountId (InDb tx) (ourAddrs esk)
-        case res of
-            Left e -> return (Left e)
-            Right () -> do
-                let txId = hash . taTx $ tx
-                modifyMVar_ walletSubmission (return . addPending accountId (singletonPending txId tx))
-                return $ Right ()
-    where
-        allAddrs = NE.toList $ map txOutAddress (_txOutputs . taTx $ tx)
-        wid      = WalletIdHdRnd (accountId ^. hdAccountIdParent)
-
-        -- TODO (@uroboros/ryan) decide what to do with this error
-        lookupESK :: Keystore -> IO EncryptedSecretKey
-        lookupESK ks' = do
-            mbEsk <- Keystore.lookup wid ks'
-            case mbEsk of
-                 Nothing  -> error "TODO Could not retrieve the Keystore ESK for this AccountId"
-                 Just esk' -> return esk'
-
-        ourAddrs :: EncryptedSecretKey -> [AddrWithId]
-        ourAddrs esk' =
-            map swap $ prefilter wKey identity allAddrs
-            where
-                wKey = (wid, eskToWalletDecrCredentials esk')
+newPending :: ActiveWallet
+           -> HdAccountId
+           -> TxAux
+           -> IO (Either NewPendingError ())
+newPending w accountId tx =
+    newTx w accountId tx (NewPendingMissingKey accountId) $ \ourAddrs ->
+        update' ((walletPassive w) ^. wallets) $ NewPending accountId (InDb tx) ourAddrs
 
 -- | Submit new foreign transaction
 --
 -- A foreign transaction is a transaction that transfers funds from /another/
 -- wallet to this one.
 newForeign :: ActiveWallet -> HdAccountId -> TxAux -> IO (Either NewForeignError ())
-newForeign ActiveWallet{..} accountId tx = do
-    res <- update' (walletPassive ^. wallets) $ NewForeign accountId (InDb tx)
-    case res of
-        Left e -> return (Left e)
-        Right () -> do
-            modifyMVar_ walletSubmission (return . addPending accountId (Pending.singleton tx))
-            return $ Right ()
+newForeign w accountId tx = do
+    newTx w accountId tx (NewForeignMissingKey accountId) $ \ourAddrs ->
+        update' ((walletPassive w) ^. wallets) $ NewForeign accountId (InDb tx) ourAddrs
 
 cancelPending :: PassiveWallet -> Cancelled -> IO ()
 cancelPending passiveWallet cancelled =

@@ -19,9 +19,9 @@ import qualified Data.Set as Set
 import qualified Cardano.Wallet.Kernel as Kernel
 import           Cardano.Wallet.Kernel.DB.AcidState (dbHdWallets)
 import           Cardano.Wallet.Kernel.DB.BlockMeta (AddressMeta (..), BlockMeta (..))
-import           Cardano.Wallet.Kernel.DB.HdWallet (hdAccountCheckpoints)
+import           Cardano.Wallet.Kernel.DB.HdWallet (HdAccountState (..), hdAccountState, hdUpToDateCheckpoints)
 import           Cardano.Wallet.Kernel.DB.HdWallet.Read (readAllHdAccounts)
-import           Cardano.Wallet.Kernel.DB.Spec (currentBlockMeta)
+import           Cardano.Wallet.Kernel.DB.Spec (currentCheckpoint, checkpointBlockMeta)
 import qualified Cardano.Wallet.Kernel.DB.Util.IxSet as IxSet
 
 import           Pos.Core(EpochIndex (..), SlotId (..), LocalSlotIndex(..))
@@ -43,7 +43,11 @@ import           Wallet.Inductive
 --   NOTE: We assume that our test data will only produce one account in the DB.
 actualBlockMeta :: Kernel.DB -> BlockMeta
 actualBlockMeta snapshot' =
-    theAccount ^. hdAccountCheckpoints . currentBlockMeta
+    case (theAccount ^. hdAccountState) of
+        HdAccountStateUpToDate acc ->
+            acc ^. hdUpToDateCheckpoints . currentCheckpoint . checkpointBlockMeta
+        _ ->
+            error "actualBlockMeta: Expected HdAccountStateUpToDate"
     where
         getOne' ix = fromMaybe (error "Expected a singleton") (IxSet.getOne ix)
         theAccount = getOne' (readAllHdAccounts $ snapshot' ^. dbHdWallets)
