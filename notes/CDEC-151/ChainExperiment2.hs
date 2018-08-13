@@ -263,20 +263,49 @@ invVolatile (Volatile blocks (Just tip)) =
 
 chainBackwardsFrom :: Map BlockId (Block, Maybe BlockId)
                    -> BlockId
-                   -> [Block]
+                   -> [Block] -- ^ newest first
 chainBackwardsFrom blocks bid =
     case Map.lookup bid blocks of
       Nothing    -> []
       Just (b,_) -> b : chainBackwardsFrom blocks (prevBlockId b)
 
+chainBackwardsFromTo
+    :: Map BlockId (Block, Maybe BlockId)
+    -> BlockId
+    -- ^ from
+    -> BlockId
+    -- ^ to
+    -> Maybe [Block]
+    -- ^ newest first, it is guaranteed that the list ends on the block after
+    -- @toBid@ block
+chainBackwardsFromTo blocks fromBid toBid =
+    case Map.lookup fromBid blocks of
+        Nothing -> Nothing
+        Just (b, _)
+            | blockId b == toBid
+                -> Just []
+            | otherwise
+                -> fmap (b :) $ chainBackwardsFromTo blocks (prevBlockId b) toBid
+
 chainBackwardsFrom' :: Map BlockId (Block, Maybe BlockId)
                     -> BlockId
-                    -> [(Block, Maybe BlockId)]
+                    -> [(Block, Maybe BlockId)] -- ^ newest first
 chainBackwardsFrom' blocks bid =
     case Map.lookup bid blocks of
       Nothing      -> []
       Just e@(b,_) -> e : chainBackwardsFrom' blocks (prevBlockId b)
 
+
+chainForwardFrom :: Map BlockId (Block, Maybe BlockId)
+                 -> BlockId
+                 -> [Block] -- ^ oldest first
+chainForwardFrom blocks blockId = go blockId id
+    where
+    go :: BlockId -> ([Block] -> r) -> r
+    go bid k = case Map.lookup bid blocks of
+        Nothing                 -> k []
+        Just (block, Nothing)   -> k [block]
+        Just (block, Just bid') -> go bid' (k . (block :))
 
 --
 -- The abstraction function
@@ -428,6 +457,8 @@ data ReaderState  = ReaderState {
      }
   deriving (Eq, Show)
 
+blockPoint :: Block -> Point
+blockPoint b = (blockSlot b, blockId b)
 
 invChainProducerState :: ChainProducerState -> Bool
 invChainProducerState (ChainProducerState cs rs) =
@@ -496,16 +527,33 @@ initialiseReader pointReader pointIntersection (ChainProducerState cs rs)
 freshReaderId :: ReaderStates -> ReaderId
 freshReaderId rs = 1 + maximum [ readerId | ReaderState{readerId} <- rs ]
 
-lookupReader :: ChainProducerState -> ReaderId -> Maybe ReaderState
-lookupReader (ChainProducerState _ rs) rid = go rs
+lookupReader :: ReaderStates -> ReaderId -> Maybe ReaderState
+lookupReader rs rid = go rs
     where
     go [] = Nothing
     go (rs@ReaderState{readerId}:rs') | readerId == rid = Just rs
                                       | otherwise       = go rs'
 
-readerInstruction :: ChainProducerState
-                  -> ReaderId -> Maybe (ChainProducerState, ConsumeChain Block)
-readerInstruction cps rid = undefined
+readerInstructions
+    :: ChainProducerState
+    -> ReaderId
+    -> Maybe [ConsumeChain Block]
+readerInstructions (ChainProducerState (ChainState (Volatile blocks _)) crs) rid = do
+    ReaderState{readerIntersection, readerHead} <- lookupReader crs rid
+    let ccs = map RollForward $ chainForwardFrom blocks (snd readerHead)
+    if readerIntersection == readerHead
+        then Just ccs
+        else do
+            bs <- chainBackwardsFromTo blocks (snd readerHead) (snd readerIntersection)
+            Just $ (fmap (RollBackward . blockPoint) bs) ++ ccs
+
+-- |
+-- Reshuffle pointers if we are switching to another tine.
+normalizeChainState
+    :: ChainProducerState
+    -> ChainUpdate
+    -> ChainProducerState
+normalizeChainState = undefined
 
 data ConsumeChain block = RollForward  block
                         | RollBackward Point
